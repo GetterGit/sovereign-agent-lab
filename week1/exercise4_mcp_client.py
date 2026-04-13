@@ -44,6 +44,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from pydantic import create_model
 
 load_dotenv()
 
@@ -93,10 +94,26 @@ async def discover_tools(server_script: str) -> list:
             raw   = await session.list_tools()
             tools = []
             for t in raw.tools:
+                schema = t.inputSchema or {}
+                props = schema.get("properties", {})
+                required = set(schema.get("required", []))
+
+                type_map = {"string": str, "integer": int, "boolean": bool, "number": float}
+                fields = {}
+                for pname, pinfo in props.items():
+                    py_type = type_map.get(pinfo.get("type", "string"), str)
+                    if pname in required:
+                        fields[pname] = (py_type, ...)
+                    else:
+                        fields[pname] = (py_type, None)
+
+                args_model = create_model(f"{t.name}Args", **fields)
+
                 lc_tool = StructuredTool.from_function(
                     func=_make_mcp_caller(t.name, server_script),
                     name=t.name,
                     description=t.description or f"MCP tool: {t.name}",
+                    args_schema=args_model,
                 )
                 tools.append(lc_tool)
             return tools, [t.name for t in raw.tools]
@@ -109,12 +126,13 @@ def extract_trace(result: dict) -> list:
     for m in result["messages"]:
         role    = getattr(m, "type", "unknown")
         content = m.content
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    trace.append({"role": "tool_call", "tool": block["name"],
-                                  "args": block.get("input", {})})
-        elif content:
+
+        if m.type == "ai":
+            for tool_call in m.tool_calls:
+                trace.append({"role": "tool_call", "tool": tool_call["name"],
+                              "args": tool_call.get("args", {})})
+
+        if content:
             trace.append({"role": role, "content": str(content)})
     return trace
 
@@ -145,7 +163,10 @@ async def main() -> None:
     tools, tool_names = await discover_tools(SERVER_SCRIPT)
     print(f"\n  Discovered {len(tools)} tools: {tool_names}")
 
-    agent  = create_react_agent(llm, tools)
+    agent  = create_react_agent(
+        llm, tools,
+        prompt="You are a helpful research assistant. Use the provided tools to answer the user's request. Never output raw JSON — always use the tool-calling interface.",
+    )
     output = {"server_script": SERVER_SCRIPT, "tools_discovered": tool_names, "queries": {}}
 
     # ── Query 1: search + detail fetch ────────────────────────────────────────

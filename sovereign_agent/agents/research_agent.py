@@ -86,7 +86,11 @@ TOOLS = [
 
 # Build the agent once at module load time.
 # Rebuilding it on every call would be wasteful.
-_agent = create_react_agent(llm, TOOLS)
+_agent = create_react_agent(
+    llm,
+    TOOLS,
+    prompt="You are a helpful research assistant. Use the provided tools to answer the user's request. Never output raw JSON — always use the tool-calling interface.",
+)
 
 
 # ─── Public interface ─────────────────────────────────────────────────────────
@@ -122,17 +126,14 @@ def run_research_agent(task: str, max_turns: int = 8) -> dict:
         role    = getattr(m, "type", "unknown")
         content = m.content
 
-        # Tool-call messages have structured list content
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    entry = {
-                        "tool": block["name"],
-                        "args": block.get("input", {}),
-                    }
-                    tool_calls_made.append(entry)
-                    full_trace.append({"role": "tool_call", **entry})
-            continue
+        if m.type == "ai":
+            for tool_call in m.tool_calls:
+                entry = {
+                    "tool": tool_call["name"],
+                    "args": tool_call.get("args", {}),
+                }
+                tool_calls_made.append(entry)
+                full_trace.append({"role": "tool_call", **entry})
 
         if content:
             full_trace.append({"role": role, "content": str(content)})
